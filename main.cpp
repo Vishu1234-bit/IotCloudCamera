@@ -1,93 +1,235 @@
-#include <opencv2/opencv.hpp>
-using namespace cv;
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include <zbar.h>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <thread>
+#include <ctime>
+
+#include <curlpp/cURLpp.hpp>
+#include <curlpp/Easy.hpp>
+#include <curlpp/Options.hpp>
+
 using namespace std;
-void MotionDetect(); // Function to Capture Video from Cam
-void SaveVideo();
+using namespace cv;
+using namespace zbar;
+using namespace curlpp::options;
+
+void uploadToDropbox(Mat frame, bool* isUploading)
+{
+    try
+    {
+        // Get current datetime
+        time_t now = time(0);
+        string date_time = ctime(&now);
+        date_time.erase(remove(date_time.begin(), date_time.end(), '\n'), date_time.end());
+
+        curlpp::Easy myRequest;
+        list<string> header;
+        cout << "uploading\n";
+        vector<uchar> buf;
+        imencode(".jpg", frame, buf); // Reading frame in jpg format
+        string imageData(buf.begin(), buf.end());
+
+        header.push_back("Content-Type: application/octet-stream");
+        header.push_back("Dropbox-API-Arg: {\"path\": \"/" + date_time + ".jpg\",\"mode\": \"add\",\"autorename\": true,\"mute\": false,\"strict_conflict\": false}");
+        header.push_back("Authorization: Bearer stMiehmzaVUAAAAAAAAAAf96aawGX_8wGytZQetLXPFrKaUknBOGOGaUZoc_ze5R");
+        myRequest.setOpt<Url>("https://content.dropboxapi.com/2/files/upload");
+        myRequest.setOpt<PostFields>(imageData);
+        myRequest.setOpt<PostFieldSize>(imageData.length());
+        myRequest.setOpt<HttpHeader>(header);
+        myRequest.setOpt<CustomRequest>("POST");
+        myRequest.perform();
+        cout << "\ndone uploading\n";
+    }
+    catch (curlpp::RuntimeError& e)
+    {
+        std::cout << e.what() << std::endl;
+    }
+    catch (curlpp::LogicError& e)
+    {
+        std::cout << e.what() << std::endl;
+    }
+    *isUploading = false;
+}
+class CloudCam
+{
+private:
+    // Create video Capture Object
+    VideoCapture cap;
+    // Create zbar scanner
+    ImageScanner scanner;
+
+public:
+    bool isMotion = false;
+    Mat frame, reference_frame, gray_frame, frame_delta;
+    Image zbar_image;
+    CloudCam(int deviceID, int apiID)
+    {
+        // Initializing Program Here
+
+        // set resolution of camera
+        cap.set(CAP_PROP_FRAME_WIDTH, 640);
+        cap.set(CAP_PROP_FRAME_HEIGHT, 480);
+        // Configuring zbar scanner
+        scanner.set_config(ZBAR_NONE, ZBAR_CFG_ENABLE, 1);
+
+        // Open the primary camera
+        cap.open(deviceID, apiID);
+        if (!cap.isOpened())
+        {
+            cerr << "Could not open camera." << endl;
+            exit(EXIT_FAILURE);
+        }
+    }
+    void captureFrame()
+    {
+        // read camera output in frame
+        cap >> frame;
+        // converts frame to grayscale and stores it in gray_frame
+        cvtColor(frame, gray_frame, COLOR_BGR2GRAY);
+    }
+
+    int detectQR()
+    {
+        // Converting frame to grayscale for better output
+
+        int width = gray_frame.cols;
+        int height = gray_frame.rows;
+        uchar* raw = (uchar*)(gray_frame.data);
+
+        // Adjust the zbar_image properties for the captured frame
+        zbar_image.set_size(width, height);
+        zbar_image.set_data(raw, width * height);
+        zbar_image.set_format("Y800");
+
+        cout << scanner.scan(zbar_image);
+
+        return scanner.scan(zbar_image);
+    }
+
+    void writeQRToFile(const string filename, const string data)
+    {
+        cout << "Writing QR code contents to file: " << filename << endl;
+        ofstream myfile(filename);
+        if (myfile.is_open())
+        {
+            myfile << data;
+            myfile.close();
+        }
+        else
+            cout << "Unable to write contents to file";
+    }
+
+    void captureReferenceFrame()
+    {
+        // Initializing reference frame to detect motion using backgroound subrtraction method
+        cap >> reference_frame;
+        cvtColor(reference_frame, reference_frame, COLOR_BGR2GRAY);
+        // Used to smooth the edges to reduce noise
+        GaussianBlur(reference_frame, reference_frame, Size(21, 21), 0);
+    }
+
+    void detectMotion()
+    {
+        isMotion = false;
+        vector<vector<Point>> cnts;
+
+        GaussianBlur(gray_frame, gray_frame, Size(21, 21), 0);
+
+        // compute difference between first frame and current frame
+        absdiff(reference_frame, gray_frame, frame_delta);
+
+        // converts pixels above 25 to white
+        threshold(frame_delta, frame_delta, 25, 255, THRESH_BINARY);
+
+        dilate(frame_delta, frame_delta, Mat(), Point(-1, -1), 2);
+
+        findContours(frame_delta, cnts, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        for (int i = 0; i < cnts.size(); i++)
+        {
+
+            if (contourArea(cnts[i]) < 500)
+                continue;
+
+            drawContours(frame, cnts, i, Scalar(0, 255, 0), 2);
+            isMotion = true;
+            cout << "Motion Detected" << endl;
+            putText(frame, "Motion Detected", Point(10, 20), FONT_HERSHEY_SIMPLEX, 0.75, Scalar(0, 0, 255), 2);
+        }
+    }
+
+    void stop()
+    {
+        destroyAllWindows();
+        cap.release();
+        exit(0);
+    }
+};
+
 int main()
 {
-	MotionDetect();
-	exit(0);
-}
-void MotionDetect()
-{
-	Mat ref_frame, frame, difference, gray;
-	int count = 5; // Holds assumed frame count
-	VideoCapture camera(0);
-	// Sets width and height of window to 512 and 288 respectively to enable faster processing of video
-	camera.set(3, 512);
-	camera.set(4, 288);
-	// If Camera failed to open exit the function
-	if (!camera.isOpened())
-	{
-		cout << "Could not capture Video.\n";
-		exit(1);
-	}
-	//Reads first frame
-	camera.read(ref_frame);
-	cvtColor(ref_frame, ref_frame, COLOR_BGR2GRAY);
-	GaussianBlur(ref_frame, ref_frame, Size(5, 5), 0);
-	//Reads subsequent frames
-	while (camera.read(frame))
-	{
-		//imshow("Original Video", frame);
-		//Detects motion by comparing current frame with reference frame and store result in difference
-		cvtColor(frame, gray, COLOR_BGR2GRAY);
-		GaussianBlur(gray, gray, Size(5, 5), 0);
-		absdiff(ref_frame, gray, difference);
-		threshold(difference, difference, 25, 255, THRESH_BINARY);
-		dilate(difference, difference, Mat(), Point(-1, -1), 2);
-		imshow("Difference", difference);
-		// Difference frame will be black unless there is motion.
-		if (countNonZero(difference))
-		{
-			camera.release();
-			cout << "\nMotion Detected\n";
-			destroyWindow("Difference");
-			SaveVideo();
-		}
-		// Reinitialise reference frame once every 5 frames
-		if (count % 5 == 0)
-			gray.copyTo(ref_frame);
-		count++;
-		// Stop when escape key is pressed
-		if (waitKey(1) == 27)
-			break;
-	}
-	camera.release();
-	destroyWindow("Difference");
-	exit(0);
-}
-void SaveVideo()
-{
-	VideoCapture cam(0);
-	int frameno = cam.get(CAP_PROP_POS_FRAMES);
-	int maxframeno = frameno + 150;
-	if (!cam.isOpened())
-	{
-		cout << "Error opening video stream" << endl;
-		exit(-1);
-	}
-	int frame_width = cam.get(CAP_PROP_FRAME_WIDTH);
-	int frame_height = cam.get(CAP_PROP_FRAME_HEIGHT);
-	VideoWriter video("Video.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), 30,Size(frame_width, frame_height));
-	while (frameno < maxframeno)
-	{
-		Mat frame;
-		cam >> frame;
-		if (frame.empty())
-			break;
-		video.write(frame);
-		imshow("Save", frame);
-		frameno++;
-		if (waitKey(1) == 27) {
-			video.release();
-			cam.release();
-			destroyWindow("Save");
-			exit(0);
-		}
-	}
-	video.release();
-	cam.release();
-	destroyWindow("Save");
-	MotionDetect();
+    // Initializing Object
+    CloudCam cc{ 0, 0 };
+
+    // Initializing opencv window
+    namedWindow("Output", WINDOW_NORMAL);
+    resizeWindow("Output", 240, 480);
+
+    // Below Code is for QRCODE DETECTION ONLY
+    // while (true)
+    // {
+    //     cc.captureFrame();
+
+    //     // if qr code is detected
+    //     if (cc.detectQR() == 1)
+    //     {
+    //         cout << "QR Code Detected with Data: " << endl;
+
+    //         // getting the first qr code data
+    //         Image::SymbolIterator symbol = cc.zbar_image.symbol_begin();
+    //         string data = symbol->get_data();
+    //         cout << data << endl;
+    //         cc.writeQRToFile("wpa_supplicant.conf", data);
+
+    //         // check validation of qr code. if true then break the loop
+    //         if (true)
+    //             break;
+    //     }
+
+    //     imshow("Output", cc.frame);
+    //     if (waitKey(1) == 27)
+    //     {
+    //         cc.stop(); // Exit if ESC is pressed
+    //     }
+    // }
+
+    // DETECT MOTION after qr code validation
+    namedWindow("Bgr Difference", WINDOW_NORMAL);
+    resizeWindow("Bgr Difference", 240, 480);
+    bool isUploading = false;
+    while (true)
+    {
+        cc.captureReferenceFrame();
+        cc.captureFrame();
+        cc.detectMotion();
+
+        if (cc.isMotion && !isUploading)
+        {
+            isUploading = true;
+            thread t(uploadToDropbox, cc.frame, &isUploading);
+            t.detach();
+        }
+        imshow("Output", cc.frame);
+        imshow("Bgr Difference", cc.frame_delta);
+
+        if (waitKey(1) == 27)
+        {
+            cc.stop(); // Exit if ESC is pressed
+        }
+    }
+    // Release camera and destory all windows
+    cc.stop();
 }
