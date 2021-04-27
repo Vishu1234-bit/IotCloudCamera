@@ -1,71 +1,93 @@
 #include <opencv2/opencv.hpp>
-#include <C:\Users\Vishali\source\repos\IoTIoT.in\IoT-Cloud-Camera\ZBarWin64\include\zbar.h>
-#include <fstream> // For operating in files
-#include <stdio.h> // For strings
-
 using namespace cv;
 using namespace std;
-using namespace zbar;
-
-void getVideo();						//Captures Video from Cam
-void decode(Mat& im);					//Decodes info from QR Code
-int save(string var);					// Saves decoded information
-
+void MotionDetect(); // Function to Capture Video from Cam
+void SaveVideo();
 int main()
 {
-	getVideo();
+	MotionDetect();
 	exit(0);
 }
-
-void getVideo()								//Capture Video of QR Code
+void MotionDetect()
 {
-	Mat frame;
+	Mat ref_frame, frame, difference, gray;
+	int count = 5; // Holds assumed frame count
 	VideoCapture camera(0);
-	camera.set(3, 512);						// Setswidth and height of window to 512 and 288 respectively
-	camera.set(4, 288);						//to enable faster processing of video
-	if (!camera.isOpened())					// If Camera failed to open exit the function
+	// Sets width and height of window to 512 and 288 respectively to enable faster processing of video
+	camera.set(3, 512);
+	camera.set(4, 288);
+	// If Camera failed to open exit the function
+	if (!camera.isOpened())
 	{
 		cout << "Could not capture Video.\n";
 		exit(1);
 	}
+	//Reads first frame
+	camera.read(ref_frame);
+	cvtColor(ref_frame, ref_frame, COLOR_BGR2GRAY);
+	GaussianBlur(ref_frame, ref_frame, Size(5, 5), 0);
+	//Reads subsequent frames
 	while (camera.read(frame))
 	{
-		imshow("op", frame);			//Display Video
-		decode(frame);
-		if (waitKey(1) == 27)			// Stop when escape key is pressed
+		//imshow("Original Video", frame);
+		//Detects motion by comparing current frame with reference frame and store result in difference
+		cvtColor(frame, gray, COLOR_BGR2GRAY);
+		GaussianBlur(gray, gray, Size(5, 5), 0);
+		absdiff(ref_frame, gray, difference);
+		threshold(difference, difference, 25, 255, THRESH_BINARY);
+		dilate(difference, difference, Mat(), Point(-1, -1), 2);
+		imshow("Difference", difference);
+		// Difference frame will be black unless there is motion.
+		if (countNonZero(difference))
+		{
+			camera.release();
+			cout << "\nMotion Detected\n";
+			destroyWindow("Difference");
+			SaveVideo();
+		}
+		// Reinitialise reference frame once every 5 frames
+		if (count % 5 == 0)
+			gray.copyTo(ref_frame);
+		count++;
+		// Stop when escape key is pressed
+		if (waitKey(1) == 27)
 			break;
 	}
-	camera.release();					//Release camera resorce
-	destroyAllWindows();
-}
-
-void decode(Mat& im)
-{
-	ImageScanner scanner;				//Create zbar scanner
-	string var;							// Stores data
-	Mat imGray;							// Stores GrayScale image
-
-	scanner.set_config(ZBAR_NONE, ZBAR_CFG_ENABLE, 0);			//Disable all decoders
-	scanner.set_config(ZBAR_QRCODE, ZBAR_CFG_ENABLE, 1);		//Enable QR decoder
-
-	cvtColor(im, imGray, COLOR_BGR2GRAY);						// Convert image to grayscale
-	Image image(im.cols, im.rows, "Y800", (uchar*)imGray.data, im.cols * im.rows); // Wrap image data in a zbar image
-
-	int n = scanner.scan(image);								// Scan the image for QRCodes
-
-	for (Image::SymbolIterator symbol = image.symbol_begin(); symbol != image.symbol_end(); ++symbol)
-	{
-		var = symbol->get_data();
-		cout << endl << "Data : " << var << endl << endl; // Prints data
-		save(var);
-	}
-}
-
-int save(string var)
-{
-	ofstream MyFile;
-	MyFile.open("wpa_supplicant.conf", ios::out | ios::app); // Appends data to file
-	MyFile << var << endl;
-	getVideo();
+	camera.release();
+	destroyWindow("Difference");
 	exit(0);
+}
+void SaveVideo()
+{
+	VideoCapture cam(0);
+	int frameno = cam.get(CAP_PROP_POS_FRAMES);
+	int maxframeno = frameno + 150;
+	if (!cam.isOpened())
+	{
+		cout << "Error opening video stream" << endl;
+		exit(-1);
+	}
+	int frame_width = cam.get(CAP_PROP_FRAME_WIDTH);
+	int frame_height = cam.get(CAP_PROP_FRAME_HEIGHT);
+	VideoWriter video("Video.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), 30,Size(frame_width, frame_height));
+	while (frameno < maxframeno)
+	{
+		Mat frame;
+		cam >> frame;
+		if (frame.empty())
+			break;
+		video.write(frame);
+		imshow("Save", frame);
+		frameno++;
+		if (waitKey(1) == 27) {
+			video.release();
+			cam.release();
+			destroyWindow("Save");
+			exit(0);
+		}
+	}
+	video.release();
+	cam.release();
+	destroyWindow("Save");
+	MotionDetect();
 }
